@@ -236,7 +236,22 @@ DCGM_EXPORTER_PORT="$(env_get DCGM_EXPORTER_PORT 9400)"
 GF_USER="$(env_get GRAFANA_ADMIN_USER admin)"
 GF_PASS="$(env_get GRAFANA_ADMIN_PASSWORD)"
 PROM_URL="http://127.0.0.1:$PROMETHEUS_PORT"
-GRAFANA_URL="http://127.0.0.1:$GRAFANA_PORT"
+
+# HTTPS Grafana: aktif otomatis bila sertifikat ditaruh di grafana/certs/
+CERT_DIR="grafana/certs"
+mkdir -p "$CERT_DIR"
+if [[ -e "$CERT_DIR/grafana.crt" && -e "$CERT_DIR/grafana.key" ]]; then
+  GF_SCHEME="https"
+  ok "Sertifikat ditemukan ($CERT_DIR/grafana.crt + grafana.key) -> Grafana memakai HTTPS."
+elif [[ -e "$CERT_DIR/grafana.crt" || -e "$CERT_DIR/grafana.key" ]]; then
+  die "Hanya salah satu dari $CERT_DIR/grafana.crt / grafana.key yang ada. Taruh keduanya (atau hapus keduanya untuk HTTP)."
+else
+  GF_SCHEME="http"
+  info "Tidak ada sertifikat di $CERT_DIR/ -> Grafana memakai HTTP."
+fi
+# https baru ditulis ke .env setelah sertifikat lolos validasi (lihat langkah "Sertifikat HTTPS Grafana")
+[[ "$GF_SCHEME" == "http" ]] && env_set GRAFANA_PROTOCOL http
+GRAFANA_URL="$GF_SCHEME://127.0.0.1:$GRAFANA_PORT"
 
 # Mode dcgm awal
 if [[ "$MODE" == "auto" ]]; then
@@ -334,6 +349,32 @@ for i in 1 2 3; do
   warn "Pull gagal, coba lagi ($i/3)..."; sleep 5
 done
 
+if [[ "$GF_SCHEME" == "https" ]]; then
+  step "Sertifikat HTTPS Grafana"
+  # Grafana berjalan sebagai uid 472: key harus bisa dibaca uid itu. Pakai image grafana sendiri
+  # (sebagai root) untuk chown dan validasi, jadi tidak butuh sudo / openssl di host.
+  GF_IMAGE="$(dc config --images 2>/dev/null | grep -m1 grafana)"
+  if ! CERT_OUT="$("${DOCKER[@]}" run --rm -u 0 --entrypoint sh -v "$ROOT/$CERT_DIR:/c" "$GF_IMAGE" -c '
+      set -e
+      chown 472:0 /c/grafana.key && chmod 640 /c/grafana.key && chmod 644 /c/grafana.crt
+      openssl x509 -in /c/grafana.crt -noout >/dev/null 2>&1 || { echo "grafana.crt bukan sertifikat PEM yang valid"; exit 1; }
+      openssl pkey -in /c/grafana.key -noout >/dev/null 2>&1 || { echo "grafana.key bukan private key PEM yang valid (atau terenkripsi password)"; exit 1; }
+      [ "$(openssl x509 -in /c/grafana.crt -noout -pubkey | openssl sha256)" = "$(openssl pkey -in /c/grafana.key -pubout | openssl sha256)" ] ||
+        { echo "grafana.crt dan grafana.key tidak berpasangan"; exit 1; }
+      openssl x509 -in /c/grafana.crt -noout -checkend 0 >/dev/null || echo "WARN: sertifikat sudah kedaluwarsa"
+      echo "subject: $(openssl x509 -in /c/grafana.crt -noout -subject | sed "s/^subject=//")"
+      echo "berlaku s.d.: $(openssl x509 -in /c/grafana.crt -noout -enddate | cut -d= -f2)"
+      echo "SAN: $(openssl x509 -in /c/grafana.crt -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d " ")"
+    ' 2>&1)"; then
+    die "Sertifikat tidak bisa dipakai: $CERT_OUT"
+  fi
+  while IFS= read -r l; do
+    if [[ "$l" == WARN:* ]]; then warn "${l#WARN: }"; else info "$l"; fi
+  done <<<"$CERT_OUT"
+  ok "Sertifikat & key valid, izin key disesuaikan untuk Grafana (uid 472)."
+  env_set GRAFANA_PROTOCOL https
+fi
+
 step "Jalankan stack"
 deploy "$DCGM_MODE"
 ok "Container berjalan: $(dc ps --format '{{.Name}}' | sort | tr '\n' ' ')"
@@ -392,8 +433,13 @@ MIG_INST="$(prom_query 'count(DCGM_FI_PROF_GR_ENGINE_ACTIVE{job="dcgm",GPU_I_ID!
 [[ -n "$MIG_INST" ]] && info "MIG instance terdeteksi: $MIG_INST"
 
 step "Verifikasi Grafana"
-wait_for 120 curl -fsS "$GRAFANA_URL/api/health" || die "Grafana tidak siap. Cek: docker logs grafana"
-gf() { curl -fsS --max-time 15 -u "$GF_USER:$GF_PASS" "$@"; }
+# -k: cek lokal ke 127.0.0.1, nama di sertifikat memang bukan 127.0.0.1
+if ! wait_for 120 curl -kfsS "$GRAFANA_URL/api/health"; then
+  "${DOCKER[@]}" logs --tail 15 grafana 2>&1 | sed 's/^/      /'
+  die "Grafana tidak siap ($GRAFANA_URL). Cek log di atas / docker logs grafana"
+fi
+ok "Grafana siap ($GF_SCHEME)"
+gf() { curl -kfsS --max-time 15 -u "$GF_USER:$GF_PASS" "$@"; }
 if ! gf "$GRAFANA_URL/api/user" >/dev/null 2>&1; then
   info "Login gagal (volume Grafana lama memakai password lain) -> reset password admin sesuai .env"
   "${DOCKER[@]}" exec grafana grafana cli admin reset-admin-password "$GF_PASS" >/dev/null 2>&1 ||
@@ -436,7 +482,8 @@ else
   printf '%s Selesai — semua verifikasi lolos%s\n' "$C_G$C_B" "$C_0"
 fi
 printf '%s════════════════════════════════════════════════════════════%s\n' "$C_G$C_B" "$C_0"
-printf '  Grafana     : http://%s:%s   (user: %s, password: lihat GRAFANA_ADMIN_PASSWORD di %s/.env)\n' "$IP" "$GRAFANA_PORT" "$GF_USER" "$ROOT"
+printf '  Grafana     : %s://%s:%s   (user: %s, password: lihat GRAFANA_ADMIN_PASSWORD di %s/.env)\n' "$GF_SCHEME" "$IP" "$GRAFANA_PORT" "$GF_USER" "$ROOT"
+[[ "$GF_SCHEME" == "http" ]] && printf '  HTTPS       : taruh grafana.crt + grafana.key di %s/%s/ lalu jalankan ulang ./install.sh\n' "$ROOT" "$CERT_DIR"
 printf '  Dashboard   : GPU B300 Monitoring (home), Node Host Monitoring\n'
 printf '  Prometheus  : http://%s:%s\n' "$IP" "$PROMETHEUS_PORT"
 printf '  Mode DCGM   : %s\n' "$DCGM_MODE"

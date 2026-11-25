@@ -1,3 +1,6 @@
 .env
 test/state/mig
 __pycache__/
+docs/
+grafana/certs/*
+!grafana/certs/README.md

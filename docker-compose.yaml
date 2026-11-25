@@ -53,10 +53,16 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD di file .env}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/gpu-b300-monitoring.json
+      # HTTPS: install.sh men-set GRAFANA_PROTOCOL=https bila grafana/certs/grafana.crt dan
+      # grafana.key ada. Tanpa file tersebut tetap http (path cert diabaikan).
+      - GF_SERVER_PROTOCOL=${GRAFANA_PROTOCOL:-http}
+      - GF_SERVER_CERT_FILE=/etc/grafana/certs/grafana.crt
+      - GF_SERVER_CERT_KEY=/etc/grafana/certs/grafana.key
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/certs:/etc/grafana/certs:ro
     ports:
       - "${GRAFANA_PORT:-3000}:3000"
     networks:

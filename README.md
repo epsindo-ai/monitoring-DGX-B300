@@ -15,7 +15,7 @@ test/                          exporter GPU tiruan untuk tes di mesin tanpa GPU
 ## Deploy di DGX (sekali jalan)
 
 ```bash
-git clone https://github.com/epsindo-ai/monitoring-DGX-B300.git && cd monitoring-DGX-B300
+git clone https://github.com/epsindo-ai/monitoring-DGX-B300.git Monitoring-DGX-B300 && cd Monitoring-DGX-B300
 ./install.sh
 ```
 
@@ -52,6 +52,14 @@ setelah Grafana pernah jalan, script me-reset password admin agar sesuai.
 Dengan mode `auto` (default), script mencoba embedded dulu. Bila metrik GPU/profiling tidak keluar
 dan `nv-hostengine` host aktif, script otomatis pindah ke mode hostengine. Mode tersimpan di `.env`
 (`COMPOSE_PROFILES`), dan alamat target Prometheus ditulis ke `prometheus/targets/dcgm.yml`.
+
+### HTTPS Grafana
+
+Taruh `grafana.crt` dan `grafana.key` (PEM, key tanpa password) di `grafana/certs/`, lalu jalankan
+ulang `./install.sh`. Script mendeteksi kedua file, mengecek sertifikat valid dan berpasangan dengan
+key, mengatur izin key untuk user Grafana (uid 472), lalu menyalakan HTTPS (`GRAFANA_PROTOCOL=https`
+di `.env`). Semua pengecekan Grafana di script ikut memakai https. Tanpa kedua file, Grafana tetap
+HTTP. Detail: `grafana/certs/README.md`.
 
 ### Bila ada masalah
 
