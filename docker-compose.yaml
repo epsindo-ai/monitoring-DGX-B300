@@ -1,0 +1,125 @@
+# Monitoring stack untuk 1 node NVIDIA DGX B300.
+# Cara termudah:  ./install.sh   (cek prasyarat, deploy, dan verifikasi sampai Grafana siap)
+# Manual:         cp .env.example .env && (edit password) && docker compose up -d
+# Grafana: http://<ip-dgx>:3000   Prometheus: http://<ip-dgx>:9090
+
+name: b300-monitoring
+
+x-dcgm-exporter: &dcgm-exporter
+  # B300 butuh DCGM >= 4.5. Tag = <versi-DCGM>-<versi-exporter>-<distro>.
+  # Samakan dengan versi DCGM/driver di host bila perlu (cek: dcgmi --version).
+  image: ${DCGM_EXPORTER_IMAGE:-nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04}
+  volumes:
+    - ./dcgm/counters.csv:/etc/dcgm-exporter/counters.csv:ro
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+  # Dibutuhkan untuk metrik profiling (DCGM_FI_PROF_*).
+  cap_add:
+    - SYS_ADMIN
+  restart: unless-stopped
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    volumes:
+      - ./prometheus/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - monitoring
+    # node-exporter (dan dcgm mode hostengine) berjalan di network host;
+    # Prometheus menjangkaunya lewat gateway host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0-ubuntu
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD di file .env}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/gpu-b300-monitoring.json
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Mode default: dcgm-exporter menjalankan hostengine sendiri di dalam container.
+  dcgm-exporter:
+    <<: *dcgm-exporter
+    container_name: dcgm-exporter
+    profiles: ["dcgm-embedded"]
+    environment:
+      - DCGM_EXPORTER_COLLECTORS=/etc/dcgm-exporter/counters.csv
+    networks:
+      - monitoring
+    # Tidak di-publish ke luar; Prometheus scrape via network internal.
+    expose:
+      - "9400"
+
+  # Mode alternatif: pakai nv-hostengine milik host (service nvidia-dcgm).
+  # Dipakai bila hostengine host aktif dan mode embedded tidak bisa mengambil metrik profiling.
+  dcgm-exporter-hostengine:
+    <<: *dcgm-exporter
+    container_name: dcgm-exporter-hostengine
+    profiles: ["dcgm-hostengine"]
+    network_mode: host
+    environment:
+      - DCGM_EXPORTER_COLLECTORS=/etc/dcgm-exporter/counters.csv
+      - DCGM_REMOTE_HOSTENGINE_INFO=localhost:5555
+      - DCGM_EXPORTER_LISTEN=:${DCGM_EXPORTER_PORT:-9400}
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.9.1
+    container_name: node-exporter
+    # network & pid host supaya metrik NIC/InfiniBand/proses adalah milik DGX, bukan container.
+    network_mode: host
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=:${NODE_EXPORTER_PORT:-9100}
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|var/lib/containerd/.+)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+    restart: unless-stopped
+
+  portainer:
+    # Opsional. Catatan: akses docker.sock = akses root ke DGX. EE butuh lisensi.
+    image: portainer/portainer-ee:${PORTAINER_VERSION:-lts}
+    container_name: portainer
+    profiles: ["portainer"]
+    ports:
+      - "9443:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  portainer_data:
+
+networks:
+  monitoring:

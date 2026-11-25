@@ -1,0 +1,14 @@
+# Override untuk tes di mesin TANPA GPU: ganti dcgm-exporter dengan versi tiruan.
+# Catatan: path relatif dihitung dari direktori project (root repo), bukan dari folder test/.
+#   ./install.sh --fake-gpu          (cara termudah; memakai file ini otomatis)
+# Simulasi MIG:  echo "0,1" > test/state/mig   (kosongkan file untuk kembali non-MIG)
+services:
+  dcgm-exporter:
+    image: python:3.12-alpine
+    environment: !reset []
+    command: ["python", "-u", "/app/fake_dcgm_exporter.py"]
+    volumes: !override
+      - ./test/fake_dcgm_exporter.py:/app/fake_dcgm_exporter.py:ro
+      - ./test/state:/state:ro
+    deploy: !reset {}
+    cap_add: !reset []

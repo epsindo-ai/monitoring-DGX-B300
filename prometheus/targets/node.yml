@@ -1,0 +1,2 @@
+# Ditulis oleh install.sh (port mengikuti NODE_EXPORTER_PORT di .env).
+- targets: ['host.docker.internal:9100']
